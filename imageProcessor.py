@@ -94,7 +94,6 @@ class ImageProcessor:
             segmentation = mask['segmentation']
             x, y, w, h = cv2.boundingRect(segmentation.astype(np.uint8))
             cropped_object = image[y:y+h, x:x+w].copy()
-            cv2.imwrite(f'objects/{category}_{self.objects}.jpg', cropped_object)
             self.objects += 1
 
             # Run YOLO detection
@@ -150,16 +149,7 @@ class ImageProcessor:
                         yy1, yy2 = max(0, y1 - padding) + yy1, max(0, y1 - padding) + yy2
 
                         detected_objects.append((label, (xx1, yy1, xx2, yy2)))        
-                        
-                        # Draw on the image
-                        # cv2.rectangle(output_image, (xx1, yy1), (xx2, yy2), (0, 255, 0), 2)
-                        # cv2.putText(output_image, f"{label} {conf:.2f}", (xx1, yy1 - 5),
-                        #             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)      
-        # Convert BGR (OpenCV) to RGB (matplotlib) for display
-        output_image_rgb = cv2.cvtColor(output_image, cv2.COLOR_BGR2RGB)
-
-        # Show image
-        cv2.imwrite('output.jpg', output_image_rgb)                      
+                                  
         
         return detected_objects
 
@@ -308,7 +298,6 @@ class ImageProcessor:
             label_list.append(label)
         
 
-        cv2.imwrite('result.jpg', dirty_image_draw)
         return (image_list, label_list)
 
 
@@ -317,7 +306,6 @@ class ImageProcessor:
         print("Warping dirty image to clean image...")
         
         self.warp_dirty_to_clean()
-        cv2.imwrite('aligned.jpg', self.dirty_image)
         print("Applying SAM segmentation and YOLO detection...")
         displaced, removed, new = self.segment_and_detect()
         return self.draw_results(displaced, removed, new)    

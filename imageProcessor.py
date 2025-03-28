@@ -5,26 +5,24 @@ import matplotlib.pyplot as plt
 from lightglue import LightGlue, SIFT
 from lightglue.utils import rbd
 from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
-from ultralytics import YOLO
+from ultralytics import YOLO, FastSAM
+import gc
 
 
 class ImageProcessor:
-    def __init__(self, clean_image_path = None, dirty_image_path = None, sam_model_path = "models/sam_vit_h_4b8939.pth", yolo_model_path = "models/yolov10x.pt"):
+    def __init__(self, sam_model_path = "models/sam_vit_h_4b8939.pth", yolo_model_path = "models/yolov10x.pt"):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # Load images
-        # self.clean_image_path = clean_image_path
-        # self.dirty_image_path = dirty_image_path
-        # self.clean_image = cv2.imread(clean_image_path)
-        # self.dirty_image = cv2.imread(dirty_image_path)
-
+        self.clean_image = None
+        self.dirty_image = None
         # Initialize feature extractor and matcher
         self.extractor = SIFT()
         self.matcher = LightGlue(features="sift").eval().to(self.device)
 
         # Load SAM model
-        self.sam = sam_model_registry["vit_h"](checkpoint=sam_model_path).to(self.device)
-        self.mask_generator = SamAutomaticMaskGenerator(self.sam)
+        # self.sam = sam_model_registry["vit_h"](checkpoint=sam_model_path).to(self.device)
+        # self.mask_generator = SamAutomaticMaskGenerator(self.sam)
+        self.segmentor = FastSAM('models/FastSAM-x.pt').to(self.device)
 
         # Load YOLO model
         self.yolo_model = YOLO(yolo_model_path).to(self.device)
@@ -32,8 +30,8 @@ class ImageProcessor:
 
     def warp_dirty_to_clean(self):
         """Aligns the dirty image to the clean image using SIFT + LightGlue feature matching."""
-        gray_clean = cv2.cvtColor(self.clean_image, cv2.COLOR_BGR2GRAY)
-        gray_dirty = cv2.cvtColor(self.dirty_image, cv2.COLOR_BGR2GRAY)
+        gray_clean = cv2.cvtColor(self.clean_image, cv2.COLOR_RGB2GRAY)
+        gray_dirty = cv2.cvtColor(self.dirty_image, cv2.COLOR_RGB2GRAY)
 
         image0 = torch.tensor(gray_clean, dtype=torch.float32, device=self.device) / 255.0
         image1 = torch.tensor(gray_dirty, dtype=torch.float32, device=self.device) / 255.0
@@ -63,8 +61,14 @@ class ImageProcessor:
                                                   (self.clean_image.shape[1], self.clean_image.shape[0]))
 
         self.dirty_image = aligned_dirty_image  # Update dirty image
+        
+        del image0, image1, feats0, feats1, matches01, kpts0, kpts1, matches
+        torch.cuda.empty_cache()
+        gc.collect()
+        
         return aligned_dirty_image
 
+    
     def segment_and_detect(self):
         """Applies SAM for segmentation and YOLO for object detection on the aligned image."""
         clean_rgb = cv2.cvtColor(self.clean_image, cv2.COLOR_BGR2RGB)
@@ -72,12 +76,14 @@ class ImageProcessor:
 
         # Generate segmentation masks
         with torch.no_grad():
-            clean_masks = self.mask_generator.generate(clean_rgb)
-            dirty_masks = self.mask_generator.generate(dirty_rgb)
+            # clean_masks = self.mask_generator.generate(clean_rgb)
+            # dirty_masks = self.mask_generator.generate(dirty_rgb)
+            clean_masks = self.segmentor(clean_rgb, device='cuda', retina_masks=True, conf=0.4, iou=0.9)
+            dirty_masks = self.segmentor(dirty_rgb, device='cuda', retina_masks=True, conf=0.4, iou=0.9)
 
         # Detect objects
-            clean_objects = self.detect_objects(clean_rgb, clean_masks, 'clean')
-            dirty_objects = self.detect_objects(dirty_rgb, dirty_masks, 'dirty')
+            clean_objects = self.detect_objects_fastsam(clean_rgb, clean_masks[0], 'clean')
+            dirty_objects = self.detect_objects_fastsam(dirty_rgb, dirty_masks[0], 'dirty')
 
         return self.compare_objects(clean_objects, dirty_objects)
 
@@ -107,18 +113,77 @@ class ImageProcessor:
 
                     detected_objects.append((label, (x1, y1, x2, y2)))
         return detected_objects
+    
+    def detect_objects_fastsam(self, image, masks, category):
+        """Detects objects in segmented image regions using YOLO."""
+        detected_objects = []
+        h, w, _ = image.shape
+        output_image = image.copy()
+        
+        if hasattr(masks, 'boxes') and masks.boxes is not None:
+            boxes = masks.boxes.xyxy.cpu().numpy()
+            cls_indices = masks.boxes.cls.cpu().numpy()
+
+            for box, cls in zip(boxes, cls_indices):
+                x1, y1, x2, y2 = map(int, box)
+                
+                if x2 - x1 < 100 and y2 - y1 < 100:
+                    continue
+                if x2 -x1 > w * 0.7 or y2 - y1 > h * 0.6:
+                    continue
+                
+                
+                padding = 400                                
+                cropped_object = image[max(0,y1 - padding) : min(h, y2 + padding), max(0, x1 - padding):min(w, x2 + padding)].copy()
+
+                yolo_result = self.yolo_model(cropped_object, verbose=False)
+
+                for r in yolo_result:
+                    for box in r.boxes:
+                        xx1, yy1, xx2, yy2 = map(int, box.xyxy[0])
+                        conf = box.conf.item()
+                        cls = int(box.cls.item())
+                        label = self.yolo_model.names[cls]
+
+                        # Map back to original image coordinates
+                        xx1, xx2 = max(0, x1 - padding) + xx1, max(0, x1 - padding) + xx2
+                        yy1, yy2 = max(0, y1 - padding) + yy1, max(0, y1 - padding) + yy2
+
+                        detected_objects.append((label, (xx1, yy1, xx2, yy2)))        
+                        
+                        # Draw on the image
+                        # cv2.rectangle(output_image, (xx1, yy1), (xx2, yy2), (0, 255, 0), 2)
+                        # cv2.putText(output_image, f"{label} {conf:.2f}", (xx1, yy1 - 5),
+                        #             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)      
+        # Convert BGR (OpenCV) to RGB (matplotlib) for display
+        output_image_rgb = cv2.cvtColor(output_image, cv2.COLOR_BGR2RGB)
+
+        # Show image
+        cv2.imwrite('output.jpg', output_image_rgb)                      
+        
+        return detected_objects
 
     def compare_objects(self, clean_objs, dirty_objs, threshold=200):
         """Compares objects between clean and dirty images to find new, displaced, or removed objects."""
         from scipy.spatial import distance
-
+        h, w, _ = self.clean_image.shape
         displaced_objects, removed_objects, new_objects = [], [], []
         clean_dict = {label: [] for label, _ in clean_objs}
         for label, bbox in clean_objs:
+            x1, y1, x2, y2 = bbox
+            if x2 - x1 < 100 and y2 - y1 < 100:
+                continue
+            if x2 - x1 > w * 0.7 or y2 - y1 > h * 0.7:
+                continue
             clean_dict[label].append(bbox)
 
         dirty_dict = {label: [] for label, _ in dirty_objs}
         for label, bbox in dirty_objs:
+            x1, y1, x2, y2 = bbox
+            if x2 - x1 < 100 and y2 - y1 < 100:
+                continue
+            if x2 - x1 > w * 0.7 or y2 - y1 > h * 0.7:
+                continue
             dirty_dict[label].append(bbox)
 
         # Find displaced and removed objects
@@ -136,7 +201,7 @@ class ImageProcessor:
                             min_dist, closest_bbox, found = dist, dirty_bbox, True
 
                 if found and min_dist > 10:
-                    displaced_objects.append((label, clean_bbox, closest_bbox))
+                    displaced_objects.append((label, closest_bbox))
                 elif not found:
                     removed_objects.append((label, clean_bbox))
 
@@ -154,138 +219,15 @@ class ImageProcessor:
                     new_objects.append((label, dirty_bbox))
 
         return displaced_objects, removed_objects, new_objects
-    
-    # def draw_results(self, displaced, removed, new):
-    #     """Draws the results on the dirty image."""
-    #     dirty_image_draw = self.dirty_image.copy()
-
-    #     for label, bbox in new:
-    #         x1, y1, x2, y2 = bbox
-    #         if x2 - x1 < 200 and y2 - y1 < 200:
-    #             continue
-
-    #         cv2.imwrite(f'objects/{label}.jpg', dirty_image_draw[y1:y2, x1:x2])
-    #         cv2.rectangle(dirty_image_draw, (x1, y1), (x2, y2), (0, 0, 255), 3)  # Red for new objects
-    #         cv2.putText(dirty_image_draw, f"New: {label}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-
-    #     # for label, _, dirty_bbox in displaced:
-    #     #     x1, y1, x2, y2 = dirty_bbox
-    #     #     cv2.rectangle(dirty_image_draw, (x1, y1), (x2, y2), (255, 0, 0), 3)  # Blue for displaced objects
-
-    #     # for label, bbox in removed:
-    #     #     x1, y1, x2, y2 = bbox
-    #     #     cv2.rectangle(dirty_image_draw, (x1, y1), (x2, y2), (0, 0, 0), 3)  # Black for removed objects
-
-    #     cv2.imwrite('result.jpg', dirty_image_draw)
-    #     plt.figure(figsize=(12, 6))
-    #     plt.imshow(cv2.cvtColor(dirty_image_draw, cv2.COLOR_BGR2RGB))
-    #     plt.axis("off")
-    #     plt.title("Detected Changes")
-    #     plt.show()
 
     def draw_results(self, displaced, removed, new):
         """Draws the results on the dirty image with merged overlapping objects."""
         dirty_image_draw = self.dirty_image.copy()
+        
+        h, w, _ = dirty_image_draw.shape
         image_list = []
         label_list = []
-        # def compute_iou(box1, box2):
-        #     """Computes Intersection over Union (IoU) between two bounding boxes."""
-        #     x1, y1, x2, y2 = box1
-        #     x1_, y1_, x2_, y2_ = box2
-
-        #     # Compute intersection
-        #     inter_x1 = max(x1, x1_)
-        #     inter_y1 = max(y1, y1_)
-        #     inter_x2 = min(x2, x2_)
-        #     inter_y2 = min(y2, y2_)
-
-        #     inter_area = max(0, inter_x2 - inter_x1) * max(0, inter_y2 - inter_y1)
-
-        #     # Compute union
-        #     box1_area = (x2 - x1) * (y2 - y1)
-        #     box2_area = (x2_ - x1_) * (y2_ - y1_)
-        #     union_area = box1_area + box2_area - inter_area
-
-        #     return inter_area / union_area if union_area > 0 else 0
-
-        # def merge_bounding_boxes(objects, iou_threshold=0.5):
-        #     """Merges overlapping bounding boxes based on IoU threshold."""
-        #     merged_objects = []
-        #     while objects:
-        #         label, base_box = objects.pop(0)
-        #         x1, y1, x2, y2 = base_box
-        #         to_merge = [(label, base_box)]
-
-        #         for other_label, other_box in objects[:]:
-        #             if compute_iou(base_box, other_box) >= iou_threshold:
-        #                 to_merge.append((other_label, other_box))
-        #                 objects.remove((other_label, other_box))
-
-        #         # Merge bounding boxes
-        #         merged_x1 = min(box[1][0] for box in to_merge)
-        #         merged_y1 = min(box[1][1] for box in to_merge)
-        #         merged_x2 = max(box[1][2] for box in to_merge)
-        #         merged_y2 = max(box[1][3] for box in to_merge)
-
-        #         merged_objects.append((label, (merged_x1, merged_y1, merged_x2, merged_y2)))
-
-        #     return merged_objects
-
-        # def merge_bounding_boxes(objects, iou_threshold=0.5):
-        #     """Merges all overlapping and nested bounding boxes into larger ones."""
-            
-        #     def compute_iou(box1, box2):
-        #         """Computes Intersection over Union (IoU) between two bounding boxes."""
-        #         x1, y1, x2, y2 = box1
-        #         x1_, y1_, x2_, y2_ = box2
-
-        #         # Compute intersection
-        #         inter_x1 = max(x1, x1_)
-        #         inter_y1 = max(y1, y1_)
-        #         inter_x2 = min(x2, x2_)
-        #         inter_y2 = min(y2, y2_)
-
-        #         inter_area = max(0, inter_x2 - inter_x1) * max(0, inter_y2 - inter_y1)
-
-        #         # Compute union
-        #         box1_area = (x2 - x1) * (y2 - y1)
-        #         box2_area = (x2_ - x1_) * (y2_ - y1_)
-        #         union_area = box1_area + box2_area - inter_area
-
-        #         return inter_area / union_area if union_area > 0 else 0
-            
-        #     def is_inside(box1, box2):
-        #         """Checks if box1 is completely inside box2."""
-        #         x1, y1, x2, y2 = box1
-        #         x1_, y1_, x2_, y2_ = box2
-
-        #         return x1_ <= x1 and y1_ <= y1 and x2_ >= x2 and y2_ >= y2
-
-        #     merged = []
-        #     while objects:
-        #         label, base_box = objects.pop(0)
-        #         x1, y1, x2, y2 = base_box
-        #         merged_group = [(label, base_box)]
-
-        #         # Find all overlapping or inside boxes
-        #         i = 0
-        #         while i < len(objects):
-        #             other_label, other_box = objects[i]
-        #             if compute_iou(base_box, other_box) > iou_threshold or is_inside(other_box, base_box) or is_inside(base_box, other_box):
-        #                 merged_group.append((other_label, other_box))
-        #                 objects.pop(i)  # Remove and reprocess
-        #             else:
-        #                 i += 1
-
-        #         # Merge all grouped bounding boxes into one
-        #         merged_x1 = min(box[1][0] for box in merged_group)
-        #         merged_y1 = min(box[1][1] for box in merged_group)
-        #         merged_x2 = max(box[1][2] for box in merged_group)
-        #         merged_y2 = max(box[1][3] for box in merged_group)
-
-        #         merged.append((label, (merged_x1, merged_y1, merged_x2, merged_y2)))
-
-        #     return merged
+        
 
         def merge_bounding_boxes(boxes):
             
@@ -338,32 +280,44 @@ class ImageProcessor:
         
         # Merge overlapping new objects
         merged_new_objects = merge_bounding_boxes(new)
+        merged_diplaced_objects = merge_bounding_boxes(displaced)
 
         for label, bbox in merged_new_objects:
             x1, y1, x2, y2 = bbox
-            if x2 - x1 < 200 and y2 - y1 < 200:
+            if x2 - x1 <  100 and y2 - y1 < 100:
                 continue
-
-            image_list.append(dirty_image_draw[y1:y2, x1:x2])
-            label_list.append(label)
-            # cv2.imwrite(f'objects/{label}.jpg', dirty_image_draw[y1:y2, x1:x2])
+            if x2 - x1 > w * 0.7 or y2 - y1 > h * 0.7:
+                continue
+            
             # cv2.rectangle(dirty_image_draw, (x1, y1), (x2, y2), (0, 0, 255), 3)  # Red for new objects
             # cv2.putText(dirty_image_draw, f"New: {label}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            image_list.append(dirty_image_draw[y1:y2, x1:x2])
+            label_list.append(label)
 
-        # cv2.imwrite('result.jpg', dirty_image_draw)
-        # plt.figure(figsize=(12, 6))
-        # plt.imshow(cv2.cvtColor(dirty_image_draw, cv2.COLOR_BGR2RGB))
-        # plt.axis("off")
-        # plt.title("Detected Changes with Merged Objects")
-        # plt.show()
-    
+        for label, dirty_bbox in merged_diplaced_objects:
+            x1, y1, x2, y2 = dirty_bbox            
+            if x2 - x1 < 100 and y2 - y1 < 100:
+                continue
+            if x2 -x1 > w * 0.7 or y2 - y1 > h * 0.7:
+                continue
+            
+            # cv2.rectangle(dirty_image_draw, (x1, y1), (x2, y2), (255, 0, 0), 3)  # Blue for displaced objects
+            # cv2.putText(dirty_image_draw, f"Moved: {label}", (x1, y1 - 10),
+            #             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+            image_list.append(dirty_image_draw[y1:y2, x1:x2])
+            label_list.append(label)
+        
+
+        cv2.imwrite('result.jpg', dirty_image_draw)
         return (image_list, label_list)
 
 
     def process(self):
         """Executes the full pipeline: warp, segment, detect, and compare."""
         print("Warping dirty image to clean image...")
+        
         self.warp_dirty_to_clean()
+        cv2.imwrite('aligned.jpg', self.dirty_image)
         print("Applying SAM segmentation and YOLO detection...")
         displaced, removed, new = self.segment_and_detect()
         return self.draw_results(displaced, removed, new)    

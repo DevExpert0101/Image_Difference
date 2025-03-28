@@ -20,11 +20,6 @@ app.add_middleware(
 )
 
 
-# def read_image(image_bytes: bytes) -> np.ndarray:
-#     """Convert image bytes to OpenCV format"""
-#     image = np.asarray(bytearray(image_bytes), dtype=np.uint8)
-#     return cv2.imdecode(image, cv2.IMREAD_COLOR)
-
 def read_image(image_bytes: bytes) -> np.ndarray:
     """Convert uploaded image bytes to OpenCV format"""
     image_np = np.frombuffer(image_bytes, np.uint8)
@@ -40,18 +35,12 @@ async def compare_images(image1: UploadFile = File(...), image2: UploadFile = Fi
         
         if img1 is None or img2 is None:
             return JSONResponse(content={"error": "Invalid image format"}, status_code=400)
-
-        print('shape: ', img1.shape)
-        print('shape: ', img2.shape)
-        # if img1.shape != img2.shape:
-        #     return JSONResponse(content={"error": "Images must have the same dimensions"}, status_code=400)
         
         processor.clean_image = img1
         processor.dirty_image = img2
-
+        
         (image_list, lab_list)= processor.process()
-        print(1)
-        print(len(image_list))
+        
         image_byte_list = []
         label_list = []
 

@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from lightglue import LightGlue, SIFT
 from lightglue.utils import rbd
-from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
+# from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
 from ultralytics import YOLO, FastSAM
 import gc
 

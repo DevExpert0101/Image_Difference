@@ -8,6 +8,13 @@ from lightglue.utils import rbd
 from ultralytics import YOLO, FastSAM
 import gc
 
+import random
+
+torch.manual_seed(42)
+np.random.seed(42)
+random.seed(42)
+torch.use_deterministic_algorithms(True)
+
 
 class ImageProcessor:
     def __init__(self, sam_model_path = "models/sam_vit_h_4b8939.pth", yolo_model_path = "models/yolov10x.pt"):

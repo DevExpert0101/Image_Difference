@@ -33,6 +33,9 @@ async def compare_images(image1: UploadFile = File(...), image2: UploadFile = Fi
         img1 = read_image(await image1.read())
         img2 = read_image(await image2.read())
         
+        cv2.imwrite('1.jpg', img1)
+        cv2.imwrite('2.jpg', img2)
+        
         if img1 is None or img2 is None:
             return JSONResponse(content={"error": "Invalid image format"}, status_code=400)
         

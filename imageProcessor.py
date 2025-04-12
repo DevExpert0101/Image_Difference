@@ -30,8 +30,8 @@ class ImageProcessor:
 
     def warp_dirty_to_clean(self):
         """Aligns the dirty image to the clean image using SIFT + LightGlue feature matching."""
-        gray_clean = cv2.cvtColor(self.clean_image, cv2.COLOR_RGB2GRAY)
-        gray_dirty = cv2.cvtColor(self.dirty_image, cv2.COLOR_RGB2GRAY)
+        gray_clean = cv2.cvtColor(self.clean_image, cv2.COLOR_BGR2GRAY)
+        gray_dirty = cv2.cvtColor(self.dirty_image, cv2.COLOR_BGR2GRAY)
 
         image0 = torch.tensor(gray_clean, dtype=torch.float32, device=self.device) / 255.0
         image1 = torch.tensor(gray_dirty, dtype=torch.float32, device=self.device) / 255.0
@@ -40,9 +40,9 @@ class ImageProcessor:
         image1 = image1.unsqueeze(0).unsqueeze(0)
 
         # Extract features
-        with torch.no_grad():
-            feats0 = self.extractor.extract(image0)
-            feats1 = self.extractor.extract(image1)
+        # with torch.no_grad():
+        feats0 = self.extractor.extract(image0)
+        feats1 = self.extractor.extract(image1)
 
         # Match features using LightGlue
         matches01 = self.matcher({"image0": feats0, "image1": feats1})
@@ -62,9 +62,9 @@ class ImageProcessor:
 
         self.dirty_image = aligned_dirty_image  # Update dirty image
         
-        del image0, image1, feats0, feats1, matches01, kpts0, kpts1, matches
-        torch.cuda.empty_cache()
-        gc.collect()
+        # del image0, image1, feats0, feats1, matches01, kpts0, kpts1, matches
+        # torch.cuda.empty_cache()
+        # gc.collect()
         
         return aligned_dirty_image
 
@@ -73,7 +73,7 @@ class ImageProcessor:
         """Applies SAM for segmentation and YOLO for object detection on the aligned image."""
         clean_rgb = cv2.cvtColor(self.clean_image, cv2.COLOR_BGR2RGB)
         dirty_rgb = cv2.cvtColor(self.dirty_image, cv2.COLOR_BGR2RGB)
-
+        
         # Generate segmentation masks
         with torch.no_grad():
             # clean_masks = self.mask_generator.generate(clean_rgb)
@@ -149,9 +149,69 @@ class ImageProcessor:
                         yy1, yy2 = max(0, y1 - padding) + yy1, max(0, y1 - padding) + yy2
 
                         detected_objects.append((label, (xx1, yy1, xx2, yy2)))        
-                                  
+                        
+                        cv2.rectangle(output_image, (xx1, yy1), (xx2, yy2), (0, 255, 0), 2)
+                        cv2.putText(output_image, f"{label} {conf:.2f}", (xx1, yy1 - 5),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
         
         return detected_objects
+
+    # def compare_objects(self, clean_objs, dirty_objs, threshold=200):
+    #     """Compares objects between clean and dirty images to find new, displaced, or removed objects."""
+    #     from scipy.spatial import distance
+    #     h, w, _ = self.clean_image.shape
+    #     displaced_objects, removed_objects, new_objects = [], [], []
+    #     clean_dict = {label: [] for label, _ in clean_objs}
+    #     for label, bbox in clean_objs:
+    #         x1, y1, x2, y2 = bbox
+    #         if x2 - x1 < 100 and y2 - y1 < 100:
+    #             continue
+    #         if x2 - x1 > w * 0.7 or y2 - y1 > h * 0.7:
+    #             continue
+    #         clean_dict[label].append(bbox)
+
+    #     dirty_dict = {label: [] for label, _ in dirty_objs}
+    #     for label, bbox in dirty_objs:
+    #         x1, y1, x2, y2 = bbox
+    #         if x2 - x1 < 100 and y2 - y1 < 100:
+    #             continue
+    #         if x2 - x1 > w * 0.7 or y2 - y1 > h * 0.7:
+    #             continue
+    #         dirty_dict[label].append(bbox)
+
+    #     # Find displaced and removed objects
+    #     for label, clean_bbox_list in clean_dict.items():
+    #         for clean_bbox in clean_bbox_list:
+    #             found, min_dist, closest_bbox = False, float("inf"), None
+
+    #             if label in dirty_dict:
+    #                 for dirty_bbox in dirty_dict[label]:
+    #                     dist = distance.euclidean(
+    #                         [(clean_bbox[0] + clean_bbox[2]) / 2, (clean_bbox[1] + clean_bbox[3]) / 2],
+    #                         [(dirty_bbox[0] + dirty_bbox[2]) / 2, (dirty_bbox[1] + dirty_bbox[3]) / 2]
+    #                     )
+    #                     if dist < threshold and dist < min_dist:
+    #                         min_dist, closest_bbox, found = dist, dirty_bbox, True
+
+    #             if found and min_dist > 10:
+    #                 displaced_objects.append((label, closest_bbox))
+    #             elif not found:
+    #                 removed_objects.append((label, clean_bbox))
+
+    #     # Find new objects
+    #     for label, dirty_bbox_list in dirty_dict.items():
+    #         for dirty_bbox in dirty_bbox_list:
+    #             found = any(
+    #                 distance.euclidean(
+    #                     [(clean_bbox[0] + clean_bbox[2]) / 2, (clean_bbox[1] + clean_bbox[3]) / 2],
+    #                     [(dirty_bbox[0] + dirty_bbox[2]) / 2, (dirty_bbox[1] + dirty_bbox[3]) / 2]
+    #                 ) < threshold
+    #                 for clean_bbox in clean_dict.get(label, [])
+    #             )
+    #             if not found:
+    #                 new_objects.append((label, dirty_bbox))
+
+    #     return displaced_objects, removed_objects, new_objects
 
     def compare_objects(self, clean_objs, dirty_objs, threshold=200):
         """Compares objects between clean and dirty images to find new, displaced, or removed objects."""
@@ -213,6 +273,7 @@ class ImageProcessor:
     def draw_results(self, displaced, removed, new):
         """Draws the results on the dirty image with merged overlapping objects."""
         dirty_image_draw = self.dirty_image.copy()
+        clean_image_draw = self.clean_image.copy()
         
         h, w, _ = dirty_image_draw.shape
         image_list = []
@@ -307,6 +368,6 @@ class ImageProcessor:
         
         self.warp_dirty_to_clean()
         print("Applying SAM segmentation and YOLO detection...")
-        displaced, removed, new = self.segment_and_detect()
+        displaced, removed, new = self.segment_and_detect()        
         return self.draw_results(displaced, removed, new)    
     

@@ -1,11 +1,16 @@
 import torch
 import cv2
 import numpy as np
-import matplotlib.pyplot as plt
 from lightglue import LightGlue, SIFT
 from lightglue.utils import rbd
 # from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
 from ultralytics import YOLO, FastSAM
+import random
+
+torch.manual_seed(42)
+np.random.seed(42)
+random.seed(42)
+torch.use_deterministic_algorithms(True)
 import gc
 
 

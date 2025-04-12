@@ -8,12 +8,6 @@ from lightglue.utils import rbd
 from ultralytics import YOLO, FastSAM
 import gc
 
-import random
-
-torch.manual_seed(42)
-np.random.seed(42)
-random.seed(42)
-torch.use_deterministic_algorithms(True)
 
 
 class ImageProcessor:

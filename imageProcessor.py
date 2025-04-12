@@ -1,16 +1,11 @@
 import torch
 import cv2
 import numpy as np
+import matplotlib.pyplot as plt
 from lightglue import LightGlue, SIFT
 from lightglue.utils import rbd
 # from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
 from ultralytics import YOLO, FastSAM
-import random
-
-torch.manual_seed(42)
-np.random.seed(42)
-random.seed(42)
-torch.use_deterministic_algorithms(True)
 import gc
 
 
@@ -45,9 +40,9 @@ class ImageProcessor:
         image1 = image1.unsqueeze(0).unsqueeze(0)
 
         # Extract features
-        # with torch.no_grad():
-        feats0 = self.extractor.extract(image0)
-        feats1 = self.extractor.extract(image1)
+        with torch.no_grad():
+            feats0 = self.extractor.extract(image0)
+            feats1 = self.extractor.extract(image1)
 
         # Match features using LightGlue
         matches01 = self.matcher({"image0": feats0, "image1": feats1})

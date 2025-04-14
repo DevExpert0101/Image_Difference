@@ -8,6 +8,16 @@ from lightglue.utils import rbd
 from ultralytics import YOLO, FastSAM
 import gc
 
+import random
+
+torch.manual_seed(42)
+random.seed(42)
+np.random.seed(42)
+
+# torch.use_deterministic_algorithms(True)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
 
 
 class ImageProcessor:
@@ -76,11 +86,14 @@ class ImageProcessor:
         dirty_rgb = cv2.cvtColor(self.dirty_image, cv2.COLOR_BGR2RGB)
         
         # Generate segmentation masks
+        torch.use_deterministic_algorithms(False)
         with torch.no_grad():
             # clean_masks = self.mask_generator.generate(clean_rgb)
             # dirty_masks = self.mask_generator.generate(dirty_rgb)
             clean_masks = self.segmentor(clean_rgb, device='cuda', retina_masks=True, conf=0.4, iou=0.9)
             dirty_masks = self.segmentor(dirty_rgb, device='cuda', retina_masks=True, conf=0.4, iou=0.9)
+            
+            torch.use_deterministic_algorithms(True)
 
         # Detect objects
             clean_objects = self.detect_objects_fastsam(clean_rgb, clean_masks[0], 'clean')

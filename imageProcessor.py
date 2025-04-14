@@ -11,6 +11,7 @@ import gc
 import random
 
 torch.manual_seed(42)
+torch.set_float32_matmul_precision('high')
 random.seed(42)
 np.random.seed(42)
 
